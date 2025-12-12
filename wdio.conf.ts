@@ -118,9 +118,9 @@ export const config: WebdriverIO.Config = {
             screenshots: true,
             // Capture DOM snapshots before/after each action
             snapshots: true,
-            // Console logs via CDP
+            // Console logs via BiDi
             consoleLogs: true,
-            // Network logs via CDP
+            // Network logs via BiDi
             network: true,
             // Maximum snapshots
             maxSnapshots: 500,
