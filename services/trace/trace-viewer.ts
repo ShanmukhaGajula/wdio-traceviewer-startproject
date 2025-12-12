@@ -1220,7 +1220,7 @@ export function generateTraceViewer(traceData: TraceData, _options: Required<Tra
                 } else if (mimeType.includes('image')) {
                     // Check if we have base64 image data
                     if (entry.responseBody.startsWith('[base64]')) {
-                        const base64Data = entry.responseBody.substring(9).trim();
+                        const base64Data = entry.responseBody.substring(8); // Remove '[base64]' prefix (8 chars)
                         html += '<div style="background:#252525;padding:16px;border-radius:4px;text-align:center">';
                         html += '<img src="data:' + mimeType + ';base64,' + base64Data + '" style="max-width:100%;max-height:400px;border-radius:4px" />';
                         html += '</div>';

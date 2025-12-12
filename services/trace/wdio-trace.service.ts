@@ -767,16 +767,18 @@ export default class TraceService {
                                             request: reqId
                                         }
                                     });
-                                    console.log(`[TraceService] network.getData result:`, JSON.stringify(bodyData));
                                     // browser.send() wraps result: {id, result: {bytes: {...}}, type: "success"}
                                     const bytes = bodyData?.result?.bytes || bodyData?.bytes;
+                                    console.log(`[TraceService] network.getData result type:`, bytes?.type || 'none');
                                     if (bytes) {
                                         // Body data returned as BytesValue (string or base64)
                                         if (bytes.type === 'string') {
                                             entry.responseBody = bytes.value;
+                                            entry.responseBodySize = bytes.value.length;
                                         } else if (bytes.type === 'base64') {
-                                            // Keep base64 for binary data
-                                            entry.responseBody = `[base64] ${bytes.value.substring(0, 100)}...`;
+                                            // Keep full base64 for binary data (images, etc.)
+                                            entry.responseBody = `[base64]${bytes.value}`;
+                                            entry.responseBodySize = Math.round(bytes.value.length * 0.75); // Approximate decoded size
                                         }
                                     }
                                 } catch (e) {
