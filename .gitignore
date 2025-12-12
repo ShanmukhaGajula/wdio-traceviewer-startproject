@@ -1,0 +1,4 @@
+node_modules
+/trace-output/
+/.tmp/
+/allure-results/
