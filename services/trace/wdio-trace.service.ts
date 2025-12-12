@@ -241,6 +241,80 @@ export default class TraceService implements Services.ServiceInstance {
         this.currentStep = null;
     }
 
+    /**
+     * Hook that gets executed before a WebdriverIO assertion happens.
+     * This captures expect() assertions like toBeExisting(), toHaveText(), etc.
+     */
+    async beforeAssertion(params: {
+        matcherName: string;
+        expectedValue?: any;
+        options?: any;
+    }): Promise<void> {
+        const { matcherName, expectedValue } = params;
+        
+        // Capture screenshot before assertion
+        const beforeSnapshot = await this.captureScreenshot('before', null);
+        const beforeDOM = this._serviceOptions.snapshots ? await this.captureDOMSnapshot('before', null) : undefined;
+        const pageInfo = await this.getPageInfo();
+        
+        this.pendingAction = {
+            id: `action-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+            timestamp: Date.now(),
+            wallTime: Date.now(),
+            type: 'assertion',
+            category: 'assertion',
+            name: matcherName,
+            value: expectedValue !== undefined ? String(expectedValue) : undefined,
+            beforeSnapshot,
+            beforeDOM,
+            pageUrl: pageInfo.url,
+            pageTitle: pageInfo.title,
+            status: 'pending'
+        };
+    }
+
+    /**
+     * Hook that gets executed after a WebdriverIO assertion happened.
+     */
+    async afterAssertion(params: {
+        matcherName: string;
+        expectedValue?: any;
+        options?: any;
+        result: {
+            pass: boolean;
+            message: () => string;
+        };
+    }): Promise<void> {
+        if (!this.pendingAction) return;
+
+        const action = this.pendingAction;
+        this.pendingAction = null;
+
+        action.duration = Date.now() - action.timestamp;
+        action.status = params.result.pass ? 'passed' : 'failed';
+        
+        if (!params.result.pass) {
+            try {
+                action.error = params.result.message();
+            } catch {
+                action.error = 'Assertion failed';
+            }
+        }
+
+        // Capture AFTER screenshot
+        if (this.snapshotCount < this._serviceOptions.maxSnapshots) {
+            action.afterSnapshot = await this.captureScreenshot('after', null);
+            if (this._serviceOptions.snapshots) {
+                action.afterDOM = await this.captureDOMSnapshot('after', null);
+            }
+            this.snapshotCount++;
+        }
+
+        if (this.currentStep) {
+            this.currentStep.actions.push(action);
+        }
+    }
+
     async afterScenario(
         _world: any,
         result: { passed: boolean; error?: string; duration: number }

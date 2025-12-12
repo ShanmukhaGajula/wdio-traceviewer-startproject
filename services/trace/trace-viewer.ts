@@ -244,6 +244,7 @@ export function generateTraceViewer(traceData: TraceData, _options: Required<Tra
         .action-icon.keyboard { background: #4a5a3f; color: #b1dca0; }
         .action-icon.select { background: #5a3f5a; color: #dca0dc; }
         .action-icon.scroll { background: #3f5a5a; color: #a0dcdc; }
+        .action-icon.assertion { background: #2d5a2d; color: #4ec9b0; }
         .action-icon.other { background: #4a4a4a; color: #cccccc; }
 
         .action-name {
@@ -960,8 +961,9 @@ export function generateTraceViewer(traceData: TraceData, _options: Required<Tra
             
             if (selectedActionId) {
                 const data = actionIndex.get(selectedActionId);
-                if (data?.action?.network) {
-                    entries = data.action.network;
+                if (data?.action) {
+                    // Use action's network array (even if empty/undefined)
+                    entries = data.action.network || [];
                     actionStart = data.action.timestamp;
                 }
             }
@@ -1412,6 +1414,7 @@ function getActionIcon(category: string): string {
         'keyboard': '⌨',
         'select': '☑',
         'scroll': '↕',
+        'assertion': '✓',
         'other': '•'
     };
     return icons[category] || '•';

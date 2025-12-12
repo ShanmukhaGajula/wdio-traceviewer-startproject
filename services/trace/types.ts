@@ -7,7 +7,7 @@ export interface TraceAction {
     timestamp: number;
     wallTime: number;
     type: 'action' | 'navigation' | 'wait' | 'assertion';
-    category: 'click' | 'fill' | 'navigate' | 'select' | 'keyboard' | 'wait' | 'scroll' | 'other';
+    category: 'click' | 'fill' | 'navigate' | 'select' | 'keyboard' | 'wait' | 'scroll' | 'assertion' | 'other';
     name: string;
     selector?: string;
     value?: string;
