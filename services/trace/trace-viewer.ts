@@ -1212,11 +1212,32 @@ export function generateTraceViewer(traceData: TraceData, _options: Required<Tra
                         html += '<div style="color:#888">Invalid JSON</div>';
                     }
                 } else if (mimeType.includes('html')) {
-                    html += '<div style="background:#fff;padding:8px;border-radius:4px;max-height:400px;overflow:auto">';
-                    html += entry.responseBody.substring(0, 10000);
-                    html += '</div>';
+                    // Render HTML in an iframe with base URL for proper resource loading
+                    const baseUrl = entry.url || '';
+                    const baseOrigin = baseUrl ? new URL(baseUrl).origin : '';
+                    const htmlWithBase = '<!DOCTYPE html><html><head><base href="' + escapeHtml(baseOrigin + '/') + '"></head><body>' + entry.responseBody.substring(0, 50000) + '</body></html>';
+                    html += '<iframe sandbox="allow-same-origin" style="width:100%;height:400px;border:1px solid #444;border-radius:4px;background:#fff" srcdoc="' + escapeHtml(htmlWithBase).replace(/"/g, '&quot;') + '"></iframe>';
                 } else if (mimeType.includes('image')) {
-                    html += '<div style="color:#888">Image preview not available (binary data)</div>';
+                    // Check if we have base64 image data
+                    if (entry.responseBody.startsWith('[base64]')) {
+                        const base64Data = entry.responseBody.substring(9).trim();
+                        html += '<div style="background:#252525;padding:16px;border-radius:4px;text-align:center">';
+                        html += '<img src="data:' + mimeType + ';base64,' + base64Data + '" style="max-width:100%;max-height:400px;border-radius:4px" />';
+                        html += '</div>';
+                    } else {
+                        // Try to load from URL directly
+                        html += '<div style="background:#252525;padding:16px;border-radius:4px;text-align:center">';
+                        html += '<img src="' + escapeHtml(entry.url) + '" style="max-width:100%;max-height:400px;border-radius:4px" onerror="this.style.display=\\'none\\';this.parentNode.insertAdjacentHTML(\\'beforeend\\',\\'<span style=color:#888>Image could not be loaded</span>\\')"/>';
+                        html += '</div>';
+                    }
+                } else if (mimeType.includes('css')) {
+                    // Syntax highlight CSS
+                    html += '<pre style="background:#252525;padding:8px;border-radius:4px;overflow-x:auto;color:#ce9178;margin:0;max-height:400px">' + escapeHtml(entry.responseBody.substring(0, 10000)) + '</pre>';
+                } else if (mimeType.includes('javascript')) {
+                    // Syntax highlight JS
+                    html += '<pre style="background:#252525;padding:8px;border-radius:4px;overflow-x:auto;color:#dcdcaa;margin:0;max-height:400px">' + escapeHtml(entry.responseBody.substring(0, 10000)) + '</pre>';
+                } else if (mimeType.includes('font') || mimeType.includes('woff')) {
+                    html += '<div style="color:#888;padding:16px;text-align:center">Font file (' + escapeHtml(mimeType) + ')</div>';
                 } else {
                     html += '<pre style="background:#252525;padding:8px;border-radius:4px;overflow-x:auto;color:#ccc;margin:0;max-height:400px">' + escapeHtml(entry.responseBody.substring(0, 5000)) + '</pre>';
                 }
