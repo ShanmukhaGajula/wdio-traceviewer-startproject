@@ -382,6 +382,10 @@ export default class TraceService {
                 // Get the base URL for resolving relative URLs
                 const baseUrl = window.location.href;
                 
+                // Get actual viewport dimensions
+                const viewportWidth = window.innerWidth;
+                const viewportHeight = window.innerHeight;
+                
                 // Clone the document
                 const clone = document.documentElement.cloneNode(true) as HTMLElement;
                 
@@ -399,6 +403,20 @@ export default class TraceService {
                 const baseTag = document.createElement('base');
                 baseTag.href = baseUrl;
                 head.insertBefore(baseTag, head.firstChild);
+                
+                // Add viewport meta tag to ensure proper rendering at captured dimensions
+                const existingViewport = head.querySelector('meta[name="viewport"]');
+                if (existingViewport) existingViewport.remove();
+                
+                const viewportMeta = document.createElement('meta');
+                viewportMeta.name = 'viewport';
+                viewportMeta.content = `width=${viewportWidth}, initial-scale=1`;
+                head.insertBefore(viewportMeta, baseTag.nextSibling);
+                
+                // Add style to enforce minimum width matching viewport
+                const styleTag = document.createElement('style');
+                styleTag.textContent = `html { min-width: ${viewportWidth}px !important; }`;
+                head.appendChild(styleTag);
                 
                 // Capture form values
                 const originalInputs = document.querySelectorAll('input, textarea, select');

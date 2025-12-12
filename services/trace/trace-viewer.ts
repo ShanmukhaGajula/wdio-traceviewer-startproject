@@ -795,7 +795,26 @@ export function generateTraceViewer(traceData: TraceData, _options: Required<Tra
             if (currentSnapshotTab === 'dom-before' || currentSnapshotTab === 'dom-after') {
                 const domSnapshot = currentSnapshotTab === 'dom-before' ? action.beforeDOM : action.afterDOM;
                 if (domSnapshot) {
-                    container.innerHTML = '<iframe src="' + domSnapshot + '" style="width:100%;height:100%;border:none;border-radius:4px;background:#fff;"></iframe>';
+                    // Create browser-like frame with URL bar - fill full width/height
+                    let html = '<div style="display:flex;flex-direction:column;width:100%;height:100%;border-radius:4px;overflow:hidden;background:#2d2d2d;">';
+                    // Browser chrome (title bar)
+                    html += '<div style="background:#2d2d2d;padding:6px 10px;display:flex;align-items:center;gap:8px;flex-shrink:0;">';
+                    // Traffic light buttons
+                    html += '<div style="display:flex;gap:6px;">';
+                    html += '<div style="width:10px;height:10px;border-radius:50%;background:#ff5f57;"></div>';
+                    html += '<div style="width:10px;height:10px;border-radius:50%;background:#febc2e;"></div>';
+                    html += '<div style="width:10px;height:10px;border-radius:50%;background:#28c840;"></div>';
+                    html += '</div>';
+                    // URL bar
+                    html += '<div style="flex:1;display:flex;align-items:center;background:#1e1e1e;border-radius:4px;padding:4px 10px;margin-left:8px;">';
+                    html += '<span style="color:#888;margin-right:6px;font-size:12px;">🔒</span>';
+                    html += '<span style="color:#aaa;font-size:12px;font-family:system-ui;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + escapeHtml(action.pageUrl || 'about:blank') + '</span>';
+                    html += '</div>';
+                    html += '</div>';
+                    // Page content iframe - fills remaining space
+                    html += '<iframe src="' + domSnapshot + '" style="flex:1;width:100%;border:none;background:#fff;"></iframe>';
+                    html += '</div>';
+                    container.innerHTML = html;
                 } else {
                     container.innerHTML = '<div class="no-snapshot">No DOM snapshot available</div>';
                 }
