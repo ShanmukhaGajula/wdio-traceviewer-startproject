@@ -1,5 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
+import type { Services } from '@wdio/types';
 import type {
     TraceServiceOptions,
     TraceData,
@@ -35,8 +36,8 @@ const COMMAND_CATEGORIES: Record<string, TraceAction['category']> = {
     'scrollIntoView': 'scroll', 'scroll': 'scroll'
 };
 
-export default class TraceService {
-    private options: Required<TraceServiceOptions>;
+export default class TraceService implements Services.ServiceInstance {
+    private _serviceOptions: Required<TraceServiceOptions>;
     private traceData: TraceData | null = null;
     private currentScenario: TraceScenario | null = null;
     private currentStep: TraceStep | null = null;
@@ -48,7 +49,7 @@ export default class TraceService {
     private currentSelector: string | null = null;
 
     constructor(serviceOptions: TraceServiceOptions = {}) {
-        this.options = {
+        this._serviceOptions = {
             outputDir: serviceOptions.outputDir || './trace-output',
             screenshots: serviceOptions.screenshots ?? true,
             snapshots: serviceOptions.snapshots ?? true,
@@ -58,7 +59,7 @@ export default class TraceService {
             highlightColor: serviceOptions.highlightColor || 'rgba(255, 0, 0, 0.3)',
             commandsToTrace: serviceOptions.commandsToTrace ?? DEFAULT_COMMANDS_TO_TRACE
         };
-        this.outputDir = this.options.outputDir;
+        this.outputDir = this._serviceOptions.outputDir;
     }
 
     async onPrepare(): Promise<void> {
@@ -101,12 +102,12 @@ export default class TraceService {
         };
 
         // Setup console capture
-        if (this.options.consoleLogs) {
+        if (this._serviceOptions.consoleLogs) {
             await this.setupConsoleCapture(browser);
         }
 
         // Setup network capture
-        if (this.options.network) {
+        if (this._serviceOptions.network) {
             await this.setupNetworkCapture(browser);
         }
     }
@@ -154,7 +155,7 @@ export default class TraceService {
         // Capture BEFORE screenshot with element highlighted
         const beforeSnapshot = await this.captureScreenshot('before', this.currentSelector);
         // Capture BEFORE DOM snapshot
-        const beforeDOM = this.options.snapshots ? await this.captureDOMSnapshot('before', this.currentSelector) : undefined;
+        const beforeDOM = this._serviceOptions.snapshots ? await this.captureDOMSnapshot('before', this.currentSelector) : undefined;
         
         const pageInfo = await this.getPageInfo();
         const targetElement = isNavigation ? undefined : await this.getTargetElementInfo(this.currentSelector);
@@ -201,10 +202,10 @@ export default class TraceService {
         }
 
         // Capture AFTER screenshot (no highlight, shows result of action)
-        if (this.snapshotCount < this.options.maxSnapshots) {
+        if (this.snapshotCount < this._serviceOptions.maxSnapshots) {
             action.afterSnapshot = await this.captureScreenshot('after', null);
             // Capture AFTER DOM snapshot
-            if (this.options.snapshots) {
+            if (this._serviceOptions.snapshots) {
                 action.afterDOM = await this.captureDOMSnapshot('after', null);
             }
             this.snapshotCount++;
@@ -259,7 +260,7 @@ export default class TraceService {
             fs.writeFileSync(traceJsonPath, JSON.stringify(this.traceData, null, 2));
 
             const htmlPath = path.join(this.traceDir, 'trace-viewer.html');
-            const htmlContent = generateTraceViewer(this.traceData, this.options);
+            const htmlContent = generateTraceViewer(this.traceData, this._serviceOptions);
             fs.writeFileSync(htmlPath, htmlContent);
 
             console.log(`\n📊 Trace viewer: ${htmlPath}`);
@@ -280,7 +281,7 @@ export default class TraceService {
     // ========== Helper Methods ==========
 
     private shouldTraceCommand(commandName: string): boolean {
-        return this.options.commandsToTrace.includes(commandName);
+        return this._serviceOptions.commandsToTrace.includes(commandName);
     }
 
     private getActionType(commandName: string): TraceAction['type'] {
@@ -311,7 +312,7 @@ export default class TraceService {
      * This captures the actual visual state of the page with highlighted element
      */
     private async captureScreenshot(phase: 'before' | 'after', selector: string | null): Promise<string | undefined> {
-        if (!this._browser || !this.options.screenshots) return undefined;
+        if (!this._browser || !this._serviceOptions.screenshots) return undefined;
         
         try {
             const browser = this._browser as any;
@@ -329,7 +330,7 @@ export default class TraceService {
                             (el as HTMLElement).style.outline = '3px solid red';
                             (el as HTMLElement).style.background = color;
                         }
-                    }, selector, this.options.highlightColor);
+                    }, selector, this._serviceOptions.highlightColor);
                 } catch {
                     // Element not found or not visible, continue without highlight
                 }
@@ -384,7 +385,6 @@ export default class TraceService {
                 
                 // Get actual viewport dimensions
                 const viewportWidth = window.innerWidth;
-                const viewportHeight = window.innerHeight;
                 
                 // Clone the document
                 const clone = document.documentElement.cloneNode(true) as HTMLElement;
@@ -466,7 +466,7 @@ export default class TraceService {
                     : '<!DOCTYPE html>';
                 
                 return doctype + '\n' + clone.outerHTML;
-            }, selector, this.options.highlightColor, phase);
+            }, selector, this._serviceOptions.highlightColor, phase);
 
             // Save DOM snapshot
             const name = `dom-${Date.now()}-${phase}.html`;
