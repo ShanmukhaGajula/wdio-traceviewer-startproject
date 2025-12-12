@@ -1,5 +1,7 @@
 import * as fs from 'fs';
+import * as fsPromises from 'fs/promises';
 import * as path from 'path';
+import * as crypto from 'crypto';
 import type { Services } from '@wdio/types';
 import type {
     TraceServiceOptions,
@@ -12,6 +14,11 @@ import type {
 } from './types.js';
 import { generateTraceViewer } from './trace-viewer.js';
 
+// ============================================================================
+// PERFORMANCE OPTIMIZATIONS: O(1) lookups via frozen Sets and Maps
+// ============================================================================
+
+// Default commands as array (for config compatibility)
 const DEFAULT_COMMANDS_TO_TRACE = [
     'click', 'doubleClick', 'rightClick',
     'setValue', 'addValue', 'clearValue',
@@ -26,15 +33,46 @@ const DEFAULT_COMMANDS_TO_TRACE = [
     'pause'
 ];
 
-const COMMAND_CATEGORIES: Record<string, TraceAction['category']> = {
-    'click': 'click', 'doubleClick': 'click', 'rightClick': 'click',
-    'setValue': 'fill', 'addValue': 'fill', 'clearValue': 'fill',
-    'selectByVisibleText': 'select', 'selectByAttribute': 'select', 'selectByIndex': 'select',
-    'keys': 'keyboard',
-    'url': 'navigate', 'navigateTo': 'navigate', 'back': 'navigate', 'forward': 'navigate', 'refresh': 'navigate',
-    'waitForDisplayed': 'wait', 'waitForEnabled': 'wait', 'waitForExist': 'wait', 'waitForClickable': 'wait', 'pause': 'wait',
-    'scrollIntoView': 'scroll', 'scroll': 'scroll'
-};
+// O(1) lookup Set for navigation commands (frozen for immutability)
+const NAVIGATION_COMMANDS: ReadonlySet<string> = Object.freeze(new Set([
+    'url', 'navigateTo', 'back', 'forward', 'refresh'
+]));
+
+// O(1) lookup Set for wait commands
+const WAIT_COMMANDS: ReadonlySet<string> = Object.freeze(new Set([
+    'waitForDisplayed', 'waitForEnabled', 'waitForExist', 'waitForClickable', 'pause'
+]));
+
+// O(1) lookup Set for click actions
+const CLICK_COMMANDS: ReadonlySet<string> = Object.freeze(new Set([
+    'click', 'doubleClick', 'tap'
+]));
+
+// O(1) lookup Set for value-extracting commands
+const VALUE_COMMANDS: ReadonlySet<string> = Object.freeze(new Set([
+    'setValue', 'addValue', 'selectByVisibleText', 'url', 'navigateTo'
+]));
+
+// O(1) lookup Set for URL value commands (value is first arg)
+const URL_VALUE_COMMANDS: ReadonlySet<string> = Object.freeze(new Set([
+    'url', 'navigateTo'
+]));
+
+// O(1) lookup Map for command categories (frozen for immutability)
+const COMMAND_CATEGORIES = Object.freeze(new Map<string, TraceAction['category']>([
+    ['click', 'click'], ['doubleClick', 'click'], ['rightClick', 'click'],
+    ['setValue', 'fill'], ['addValue', 'fill'], ['clearValue', 'fill'],
+    ['selectByVisibleText', 'select'], ['selectByAttribute', 'select'], ['selectByIndex', 'select'],
+    ['keys', 'keyboard'],
+    ['url', 'navigate'], ['navigateTo', 'navigate'], ['back', 'navigate'], ['forward', 'navigate'], ['refresh', 'navigate'],
+    ['waitForDisplayed', 'wait'], ['waitForEnabled', 'wait'], ['waitForExist', 'wait'], ['waitForClickable', 'wait'], ['pause', 'wait'],
+    ['scrollIntoView', 'scroll'], ['scroll', 'scroll']
+]));
+
+// Fast ID generation using pre-computed base and counter (avoids Math.random() overhead)
+let idCounter = 0;
+const ID_BASE = Date.now().toString(36);
+const generateId = (prefix: string): string => `${prefix}-${ID_BASE}-${(idCounter++).toString(36)}`;
 
 export default class TraceService implements Services.ServiceInstance {
     private _serviceOptions: Required<TraceServiceOptions>;
@@ -47,6 +85,15 @@ export default class TraceService implements Services.ServiceInstance {
     private _browser: WebdriverIO.Browser | null = null;
     private pendingAction: TraceAction | null = null;
     private currentSelector: string | null = null;
+    
+    // O(1) command lookup Set (built from config)
+    private commandsToTraceSet: Set<string> = new Set();
+    
+    // ============================================================================
+    // OPTIMIZATION: Async I/O with write queue + DOM deduplication via SHA256 hash
+    // ============================================================================
+    private pendingWrites: Promise<void>[] = [];
+    private domHashCache: Map<string, string> = new Map(); // hash -> filename
 
     constructor(serviceOptions: TraceServiceOptions = {}) {
         this._serviceOptions = {
@@ -60,6 +107,8 @@ export default class TraceService implements Services.ServiceInstance {
             commandsToTrace: serviceOptions.commandsToTrace ?? DEFAULT_COMMANDS_TO_TRACE
         };
         this.outputDir = this._serviceOptions.outputDir;
+        // Build O(1) lookup Set from commands array
+        this.commandsToTraceSet = new Set(this._serviceOptions.commandsToTrace);
     }
 
     async onPrepare(): Promise<void> {
@@ -114,7 +163,7 @@ export default class TraceService implements Services.ServiceInstance {
 
     async beforeScenario(world: any): Promise<void> {
         this.currentScenario = {
-            id: `scenario-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+            id: generateId('scenario'),
             name: world.pickle?.name || 'Unknown Scenario',
             feature: world.gherkinDocument?.feature?.name || 'Unknown Feature',
             featureFile: world.gherkinDocument?.uri,
@@ -131,7 +180,7 @@ export default class TraceService implements Services.ServiceInstance {
 
     async beforeStep(step: any, _scenario: any): Promise<void> {
         this.currentStep = {
-            id: `step-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+            id: generateId('step'),
             name: step.text || 'Unknown Step',
             keyword: step.keyword?.trim() || '',
             startTime: Date.now(),
@@ -146,30 +195,35 @@ export default class TraceService implements Services.ServiceInstance {
     }
 
     async beforeCommand(commandName: string, args: any[]): Promise<void> {
-        if (!this.shouldTraceCommand(commandName)) return;
+        // O(1) command lookup
+        if (!this.commandsToTraceSet.has(commandName)) return;
 
-        // For navigation commands, don't try to capture element selector
-        const isNavigation = ['url', 'navigateTo', 'back', 'forward', 'refresh'].includes(commandName);
+        // O(1) navigation check
+        const isNavigation = NAVIGATION_COMMANDS.has(commandName);
         this.currentSelector = isNavigation ? null : this.extractSelector(args);
         
-        // Capture BEFORE screenshot with element highlighted
-        const beforeSnapshot = await this.captureScreenshot('before', this.currentSelector);
-        // Capture BEFORE DOM snapshot
-        const beforeDOM = this._serviceOptions.snapshots ? await this.captureDOMSnapshot('before', this.currentSelector) : undefined;
+        // Parallel capture: screenshot + DOM + page info (reduces browser roundtrips)
+        const [beforeSnapshot, beforeDOM, pageInfo] = await Promise.all([
+            this.captureScreenshot('before', this.currentSelector),
+            this._serviceOptions.snapshots ? this.captureDOMSnapshot('before', this.currentSelector) : Promise.resolve(undefined),
+            this.getPageInfo()
+        ]);
         
-        const pageInfo = await this.getPageInfo();
+        // Sequential: element info depends on selector validation
         const targetElement = isNavigation ? undefined : await this.getTargetElementInfo(this.currentSelector);
         
-        // Calculate click point for click/tap actions
-        const isClickAction = ['click', 'doubleClick', 'tap'].includes(commandName);
-        const clickPoint = isClickAction ? await this.getClickPoint(this.currentSelector, targetElement) : undefined;
+        // O(1) click check + conditional calculation
+        const clickPoint = CLICK_COMMANDS.has(commandName) 
+            ? await this.getClickPoint(this.currentSelector, targetElement) 
+            : undefined;
 
+        const now = Date.now();
         this.pendingAction = {
-            id: `action-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
-            timestamp: Date.now(),
-            wallTime: Date.now(),
+            id: generateId('action'),
+            timestamp: now,
+            wallTime: now,
             type: this.getActionType(commandName),
-            category: COMMAND_CATEGORIES[commandName] || 'other',
+            category: COMMAND_CATEGORIES.get(commandName) || 'other',
             name: commandName,
             selector: this.currentSelector || undefined,
             value: this.extractValue(commandName, args),
@@ -189,7 +243,8 @@ export default class TraceService implements Services.ServiceInstance {
         _result: unknown,
         error?: Error
     ): Promise<void> {
-        if (!this.shouldTraceCommand(commandName) || !this.pendingAction) return;
+        // O(1) lookup + early exit
+        if (!this.commandsToTraceSet.has(commandName) || !this.pendingAction) return;
 
         const action = this.pendingAction;
         this.pendingAction = null;
@@ -201,24 +256,28 @@ export default class TraceService implements Services.ServiceInstance {
             action.error = error.message;
         }
 
-        // Capture AFTER screenshot (no highlight, shows result of action)
+        // Parallel capture: screenshot + DOM + page info + element info
         if (this.snapshotCount < this._serviceOptions.maxSnapshots) {
-            action.afterSnapshot = await this.captureScreenshot('after', null);
-            // Capture AFTER DOM snapshot
-            if (this._serviceOptions.snapshots) {
-                action.afterDOM = await this.captureDOMSnapshot('after', null);
-            }
+            const selector = this.currentSelector;
+            const [afterSnapshot, afterDOM, pageInfo, targetElement] = await Promise.all([
+                this.captureScreenshot('after', null),
+                this._serviceOptions.snapshots ? this.captureDOMSnapshot('after', null) : Promise.resolve(undefined),
+                this.getPageInfo(),
+                selector ? this.getTargetElementInfo(selector) : Promise.resolve(undefined)
+            ]);
+            
+            action.afterSnapshot = afterSnapshot;
+            action.afterDOM = afterDOM;
+            action.pageUrl = pageInfo.url;
+            action.pageTitle = pageInfo.title;
+            if (targetElement) action.targetElement = targetElement;
+            
             this.snapshotCount++;
-        }
-
-        // Update page info after action
-        const pageInfo = await this.getPageInfo();
-        action.pageUrl = pageInfo.url;
-        action.pageTitle = pageInfo.title;
-
-        // Get updated element info (e.g., to show new input value)
-        if (this.currentSelector) {
-            action.targetElement = await this.getTargetElementInfo(this.currentSelector);
+        } else {
+            // Still update page info even if we're past max snapshots
+            const pageInfo = await this.getPageInfo();
+            action.pageUrl = pageInfo.url;
+            action.pageTitle = pageInfo.title;
         }
 
         if (this.currentStep) {
@@ -252,15 +311,18 @@ export default class TraceService implements Services.ServiceInstance {
     }): Promise<void> {
         const { matcherName, expectedValue } = params;
         
-        // Capture screenshot before assertion
-        const beforeSnapshot = await this.captureScreenshot('before', null);
-        const beforeDOM = this._serviceOptions.snapshots ? await this.captureDOMSnapshot('before', null) : undefined;
-        const pageInfo = await this.getPageInfo();
+        // Parallel capture: screenshot + DOM + page info
+        const [beforeSnapshot, beforeDOM, pageInfo] = await Promise.all([
+            this.captureScreenshot('before', null),
+            this._serviceOptions.snapshots ? this.captureDOMSnapshot('before', null) : Promise.resolve(undefined),
+            this.getPageInfo()
+        ]);
         
+        const now = Date.now();
         this.pendingAction = {
-            id: `action-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
-            timestamp: Date.now(),
-            wallTime: Date.now(),
+            id: generateId('action'),
+            timestamp: now,
+            wallTime: now,
             type: 'assertion',
             category: 'assertion',
             name: matcherName,
@@ -281,7 +343,7 @@ export default class TraceService implements Services.ServiceInstance {
         expectedValue?: any;
         options?: any;
         result: {
-            pass: boolean;
+            result: boolean;
             message: () => string;
         };
     }): Promise<void> {
@@ -291,9 +353,9 @@ export default class TraceService implements Services.ServiceInstance {
         this.pendingAction = null;
 
         action.duration = Date.now() - action.timestamp;
-        action.status = params.result.pass ? 'passed' : 'failed';
+        action.status = params.result.result ? 'passed' : 'failed';
         
-        if (!params.result.pass) {
+        if (!params.result.result) {
             try {
                 action.error = params.result.message();
             } catch {
@@ -301,12 +363,14 @@ export default class TraceService implements Services.ServiceInstance {
             }
         }
 
-        // Capture AFTER screenshot
+        // Parallel capture: screenshot + DOM
         if (this.snapshotCount < this._serviceOptions.maxSnapshots) {
-            action.afterSnapshot = await this.captureScreenshot('after', null);
-            if (this._serviceOptions.snapshots) {
-                action.afterDOM = await this.captureDOMSnapshot('after', null);
-            }
+            const [afterSnapshot, afterDOM] = await Promise.all([
+                this.captureScreenshot('after', null),
+                this._serviceOptions.snapshots ? this.captureDOMSnapshot('after', null) : Promise.resolve(undefined)
+            ]);
+            action.afterSnapshot = afterSnapshot;
+            action.afterDOM = afterDOM;
             this.snapshotCount++;
         }
 
@@ -330,6 +394,14 @@ export default class TraceService implements Services.ServiceInstance {
         if (this.traceData) {
             this.traceData.endTime = Date.now();
 
+            // ============================================================================
+            // OPTIMIZATION: Await all pending async file writes before saving trace.json
+            // ============================================================================
+            if (this.pendingWrites.length > 0) {
+                await Promise.all(this.pendingWrites);
+                this.pendingWrites = [];
+            }
+
             const traceJsonPath = path.join(this.traceDir, 'trace.json');
             fs.writeFileSync(traceJsonPath, JSON.stringify(this.traceData, null, 2));
 
@@ -338,6 +410,7 @@ export default class TraceService implements Services.ServiceInstance {
             fs.writeFileSync(htmlPath, htmlContent);
 
             console.log(`\n📊 Trace viewer: ${htmlPath}`);
+            console.log(`   DOM snapshots deduplicated: ${this.domHashCache.size} unique`);
         }
     }
 
@@ -354,13 +427,10 @@ export default class TraceService implements Services.ServiceInstance {
 
     // ========== Helper Methods ==========
 
-    private shouldTraceCommand(commandName: string): boolean {
-        return this._serviceOptions.commandsToTrace.includes(commandName);
-    }
-
     private getActionType(commandName: string): TraceAction['type'] {
-        if (['url', 'navigateTo', 'back', 'forward', 'refresh'].includes(commandName)) return 'navigation';
-        if (['waitForDisplayed', 'waitForEnabled', 'waitForExist', 'waitForClickable', 'pause'].includes(commandName)) return 'wait';
+        // O(1) lookups via pre-built Sets
+        if (NAVIGATION_COMMANDS.has(commandName)) return 'navigation';
+        if (WAIT_COMMANDS.has(commandName)) return 'wait';
         return 'action';
     }
 
@@ -373,18 +443,19 @@ export default class TraceService implements Services.ServiceInstance {
     }
 
     private extractValue(commandName: string, args: any[]): string | undefined {
-        if (['setValue', 'addValue', 'selectByVisibleText', 'url', 'navigateTo'].includes(commandName)) {
-            const valueArg = commandName === 'url' || commandName === 'navigateTo' ? args[0] : args[1];
+        // O(1) lookup via Set
+        if (VALUE_COMMANDS.has(commandName)) {
+            // O(1) lookup for URL commands
+            const valueArg = URL_VALUE_COMMANDS.has(commandName) ? args[0] : args[1];
             if (typeof valueArg === 'string') return valueArg;
             if (Array.isArray(valueArg)) return valueArg.join('');
         }
         return undefined;
     }
 
-    /**
-     * Capture a screenshot with element highlighting
-     * This captures the actual visual state of the page with highlighted element
-     */
+    // ============================================================================
+    // OPTIMIZATION #5: BiDi screenshot + merged highlight/unhighlight in single execute()
+    // ============================================================================
     private async captureScreenshot(phase: 'before' | 'after', selector: string | null): Promise<string | undefined> {
         if (!this._browser || !this._serviceOptions.screenshots) return undefined;
         
@@ -397,21 +468,29 @@ export default class TraceService implements Services.ServiceInstance {
                     await browser.execute((sel: string, color: string) => {
                         const el = document.querySelector(sel);
                         if (el) {
-                            // Store original styles
                             (el as any).__originalOutline = (el as HTMLElement).style.outline;
                             (el as any).__originalBackground = (el as HTMLElement).style.background;
-                            // Apply highlight
                             (el as HTMLElement).style.outline = '3px solid red';
                             (el as HTMLElement).style.background = color;
                         }
                     }, selector, this._serviceOptions.highlightColor);
-                } catch {
-                    // Element not found or not visible, continue without highlight
-                }
+                } catch { /* Element not found */ }
             }
 
-            // Take screenshot
-            const screenshot = await browser.takeScreenshot();
+            // Try BiDi screenshot first (faster), fallback to classic WebDriver
+            let screenshot: string;
+            try {
+                // BiDi browsingContext.captureScreenshot is faster than classic takeScreenshot
+                const result = await browser.send?.({
+                    method: 'browsingContext.captureScreenshot',
+                    params: { context: browser.sessionId }
+                });
+                screenshot = result?.result?.data || result?.data;
+                if (!screenshot) throw new Error('No BiDi screenshot data');
+            } catch {
+                // Fallback to classic WebDriver screenshot
+                screenshot = await browser.takeScreenshot();
+            }
             
             // Remove highlight after taking screenshot
             if (selector && phase === 'before') {
@@ -423,15 +502,14 @@ export default class TraceService implements Services.ServiceInstance {
                             (el as HTMLElement).style.background = (el as any).__originalBackground || '';
                         }
                     }, selector);
-                } catch {
-                    // Ignore cleanup errors
-                }
+                } catch { /* Ignore cleanup errors */ }
             }
 
-            // Save screenshot
+            // Save screenshot asynchronously (non-blocking)
             const name = `screenshot-${Date.now()}-${phase}.png`;
             const filePath = path.join(this.traceDir, 'snapshots', name);
-            fs.writeFileSync(filePath, screenshot, 'base64');
+            const writePromise = fsPromises.writeFile(filePath, screenshot, 'base64').catch(() => {});
+            this.pendingWrites.push(writePromise);
             
             return `snapshots/${name}`;
         } catch {
@@ -542,72 +620,103 @@ export default class TraceService implements Services.ServiceInstance {
                 return doctype + '\n' + clone.outerHTML;
             }, selector, this._serviceOptions.highlightColor, phase);
 
-            // Save DOM snapshot
-            const name = `dom-${Date.now()}-${phase}.html`;
-            const filePath = path.join(this.traceDir, 'snapshots', name);
-            fs.writeFileSync(filePath, htmlContent, 'utf-8');
+            // ============================================================================
+            // OPTIMIZATION: SHA256 hash deduplication - skip saving identical DOMs
+            // ============================================================================
+            const hash = crypto.createHash('sha256').update(htmlContent).digest('hex').substring(0, 16);
             
-            return `snapshots/${name}`;
+            // Check if we already have this exact DOM content
+            const existingFile = this.domHashCache.get(hash);
+            if (existingFile) {
+                // Return reference to existing file (no new write needed)
+                return existingFile;
+            }
+            
+            // New unique DOM content - save asynchronously
+            const name = `dom-${Date.now()}-${phase}.html`;
+            const relativePath = `snapshots/${name}`;
+            const filePath = path.join(this.traceDir, 'snapshots', name);
+            
+            // Cache the hash -> filename mapping
+            this.domHashCache.set(hash, relativePath);
+            
+            // Async write (non-blocking)
+            const writePromise = fsPromises.writeFile(filePath, htmlContent, 'utf-8').catch(() => {});
+            this.pendingWrites.push(writePromise);
+            
+            return relativePath;
         } catch {
             return undefined;
         }
     }
 
+    // ============================================================================
+    // OPTIMIZATION #2: Single execute() for URL + Title (saves 1 round-trip)
+    // ============================================================================
     private async getPageInfo(): Promise<{ url: string; title: string }> {
         if (!this._browser) return { url: '', title: '' };
         try {
             const browser = this._browser as any;
-            const url = await browser.getUrl();
-            const title = await browser.getTitle();
-            return { url, title };
+            // Single browser call instead of getUrl() + getTitle()
+            const info = await browser.execute(() => ({
+                url: window.location.href,
+                title: document.title
+            }));
+            return info || { url: '', title: '' };
         } catch {
             return { url: '', title: '' };
         }
     }
 
+    // ============================================================================
+    // OPTIMIZATION #1: Single execute() for all element info (saves ~7 round-trips)
+    // ============================================================================
     private async getTargetElementInfo(selector: string | null): Promise<TraceAction['targetElement'] | undefined> {
         if (!this._browser || !selector) return undefined;
 
         try {
             const browser = this._browser as any;
-            const element = await browser.$(selector);
-            if (!element || !(await element.isExisting())) return undefined;
-
-            const tagName = await element.getTagName();
-            const id = await element.getAttribute('id');
-            const className = await element.getAttribute('class');
             
-            let textContent = '';
-            let inputValue = '';
-            
-            try {
-                // Get text content
-                textContent = (await element.getText()).substring(0, 100);
-            } catch { /* ignore */ }
-            
-            try {
-                // Get input value for form elements
-                const tagLower = tagName.toLowerCase();
-                if (['input', 'textarea', 'select'].includes(tagLower)) {
-                    inputValue = await element.getValue() || '';
+            // Single browser.execute() call to get ALL element info at once
+            const info = await browser.execute((sel: string) => {
+                const el = document.querySelector(sel);
+                if (!el) return null;
+                
+                const rect = el.getBoundingClientRect();
+                const tagName = el.tagName.toLowerCase();
+                
+                // Form elements for value extraction
+                const formElements = new Set(['input', 'textarea', 'select']);
+                let inputValue = '';
+                if (formElements.has(tagName)) {
+                    inputValue = (el as HTMLInputElement).value || '';
                 }
-            } catch { /* ignore */ }
-
-            let boundingBox;
-            try {
-                const location = await element.getLocation();
-                const size = await element.getSize();
-                boundingBox = { x: location.x, y: location.y, width: size.width, height: size.height };
-            } catch { /* ignore */ }
-
+                
+                return {
+                    tagName: el.tagName,
+                    id: el.id || null,
+                    className: el.className || null,
+                    textContent: (el.textContent || '').trim().substring(0, 100),
+                    inputValue,
+                    boundingBox: {
+                        x: rect.left + window.scrollX,
+                        y: rect.top + window.scrollY,
+                        width: rect.width,
+                        height: rect.height
+                    }
+                };
+            }, selector);
+            
+            if (!info) return undefined;
+            
             return {
                 selector,
-                tagName,
-                id: id || undefined,
-                className: className || undefined,
-                textContent: textContent || undefined,
-                inputValue: inputValue || undefined,
-                boundingBox
+                tagName: info.tagName,
+                id: info.id || undefined,
+                className: info.className || undefined,
+                textContent: info.textContent || undefined,
+                inputValue: info.inputValue || undefined,
+                boundingBox: info.boundingBox
             };
         } catch {
             return undefined;
